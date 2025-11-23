@@ -64,9 +64,13 @@ def main():
         if args.scrape:
             logger.info("Scraping data from Arc Raiders wiki...")
             scraper = WikiScraper()
-            data = scraper.scrape_all_categories()
+            # Use the Loot-specific scraper which extracts Recycling and Salvaging
+            data = scraper.scrape_loot()
             scraper.save_to_json(data, args.data)
-            logger.info(f"Data saved to {args.data}")
+            # Also write a Python module for convenience
+            py_path = args.data if args.data.endswith('.py') else args.data.replace('.json', '.py')
+            scraper.save_to_python_module(data, py_path)
+            logger.info(f"Data saved to {args.data} and python module {py_path}")
         else:
             # Check if JSON file exists
             if not os.path.exists(args.data):

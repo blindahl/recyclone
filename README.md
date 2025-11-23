@@ -29,130 +29,111 @@ python main.py --scrape
 ```
 
 This will:
-1. Scrape all item recycling data from the Arc Raiders wiki
-2. Save the data to `output/recycling_data.json`
-3. Generate an interactive HTML page at `output/recycling_tracker.html`
+# Arc Raiders Recycling Tracker
 
-### Generate HTML from Existing Data
+A small Python tool that scrapes the Arc Raiders wiki (Loot page) and generates a standalone, sortable HTML report showing recycling and salvaging results for items.
 
-If you already have the JSON data file:
+This repository contains:
+
+- `scraper.py` — scraping utilities (collects item links from the Loot page and extracts Recycling and Salvaging sections from each item page)
+- `main.py` — CLI entrypoint. Orchestrates scraping and HTML generation
+- `generator.py` — builds the static HTML file (embedded CSS/JS). Item names link back to the source wiki pages
+- `requirements.txt` — Python dependencies
+- `output/` — default output directory used by the CLI
+
+## Highlights
+
+- Scrapes the `https://arcraiders.wiki/wiki/Loot` page and individual item pages
+- Produces `output/recycling_data.json` (data), `output/recycling_data.py` (Python module), and `output/recycling_tracker.html` (interactive page)
+- The HTML shows separate columns for Recycling and Salvaging results and provides sorting by item name, recycling total, and salvaging total
+- Item names are clickable links that open the original wiki page in a new tab
+
+## Quick install (recommended)
+
+Use a virtual environment to keep dependencies isolated:
 
 ```bash
-python main.py
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
 ```
 
-### Custom File Paths
+If you prefer not to use a venv, you can install globally or with `--user`:
 
 ```bash
-python main.py --scrape --output custom_page.html --data custom_data.json
+python3 -m pip install --user -r requirements.txt
 ```
 
-### Command-Line Options
+## Usage
 
-- `--scrape`: Scrape data from the wiki before generating HTML
-- `--output FILE`: Specify output HTML file path (default: `output/recycling_tracker.html`)
-- `--data FILE`: Specify JSON data file path (default: `output/recycling_data.json`)
-
-## Using the HTML Page
-
-1. Open `output/recycling_tracker.html` in your web browser
-2. Select items using the checkboxes at the top
-3. The table will show aggregated recycling materials for selected items
-4. Click "Sort Ascending ↑" or "Sort Descending ↓" to sort by quantity
-5. If no items are selected, all materials from all items are shown
-
-## Project Structure
-
-```
-arc-raiders-recycling-tracker/
-├── main.py                    # Entry point script
-├── scraper.py                 # Web scraping module
-├── generator.py               # HTML generation module
-├── requirements.txt           # Python dependencies
-├── output/                    # Generated files (created on first run)
-│   ├── recycling_data.json    # Scraped data
-│   └── recycling_tracker.html # Interactive page
-├── tests/                     # Test files
-│   ├── test_scraper.py
-│   ├── test_generator.py
-│   ├── test_integration.py
-│   └── fixtures/              # Test fixtures
-└── README.md                  # This file
-```
-
-## How It Works
-
-1. **Scraper Module** (`scraper.py`):
-   - Fetches category pages from the Arc Raiders wiki
-   - Extracts links to individual item pages
-   - Parses the "Recycled & Salvaged Materials" section from each item page
-   - Handles errors gracefully with retry logic
-   - Saves structured data to JSON
-
-2. **Generator Module** (`generator.py`):
-   - Loads data from JSON file
-   - Generates HTML with embedded CSS and JavaScript
-   - Creates checkboxes for each item
-   - Embeds interactive filtering and sorting logic
-
-3. **Main Script** (`main.py`):
-   - Parses command-line arguments
-   - Orchestrates scraping and generation workflow
-   - Provides helpful error messages
-
-## Troubleshooting
-
-### "Data file not found" Error
-
-If you see this error, run the script with the `--scrape` flag:
+Scrape the Loot page and generate outputs (JSON, Python module, HTML):
 
 ```bash
 python main.py --scrape
 ```
 
-### Scraping Takes a Long Time
+Generate HTML from an existing JSON data file:
 
-The scraper includes rate limiting (1 request per second) to avoid overwhelming the wiki server. This is intentional and respectful of the server resources.
+```bash
+python main.py --data output/recycling_data.json --output output/recycling_tracker.html
+```
 
-### Network Errors
+Custom paths example:
 
-The scraper includes automatic retry logic with exponential backoff. If a page fails after 3 attempts, it will be logged and the scraper will continue with remaining pages.
+```bash
+python main.py --scrape --data custom_data.json --output custom_page.html
+```
 
-## Requirements
+CLI options:
 
-- Python 3.7+
-- requests
-- beautifulsoup4
+- `--scrape` — fetch fresh data from the wiki
+- `--data <path>` — JSON data file path (default: `output/recycling_data.json`)
+- `--output <path>` — HTML output path (default: `output/recycling_tracker.html`)
 
-## License
+## Output files
 
-MIT
+- `output/recycling_data.json` — full scraped dataset
+- `output/recycling_data.py` — Python module exposing `RECYCLING_DATA` (same data embedded as JSON)
+- `output/recycling_tracker.html` — the generated static HTML report (open in a browser)
 
+## How the scraper works (brief)
+
+- The scraper loads the Loot page and parses the first table to find item links
+- For each item page it looks for headings containing keywords like `Recycling` / `Salvaging` and parses tables, lists or inline text after that heading
+- Materials are parsed using simple patterns (e.g. `Material: 5`, `Material (5)`, `5x Material`)
+- Salvaging entries are preserved and marked during scraping so the generator can place them in their own column
+
+## Notes & troubleshooting
+
+- Scraping will make a sequence of HTTP requests; the scraper enforces a small rate-limit and uses retry-with-backoff for robustness. Expect scraping to take time for many items.
+- If you hit network or permission issues when installing packages, use the venv approach described above or `--user` installs.
+- If the wiki layout changes, the parsing functions (`_extract_from_table`, `_extract_from_list`, `_parse_material_text`, etc.) may need updates. Adding unit tests for parsing is recommended.
 
 ## Development
 
-### Running Tests
-
-To run the test suite:
+Run tests (if present):
 
 ```bash
 python -m pytest tests/
 ```
 
-### Code Structure
+Add a reproducible lockfile if desired:
 
-The codebase follows a modular design:
+```bash
+pip freeze > requirements.lock
+```
 
-- **Data Models**: `Material` and `Item` dataclasses in `scraper.py`
-- **Scraping Logic**: `WikiScraper` class handles all web scraping with retry logic
-- **HTML Generation**: `HTMLGenerator` class creates the interactive page
-- **Main Orchestration**: `main.py` coordinates the workflow
+## Next improvements you might want
 
-## Contributing
+- Output structured `recycling` and `salvaging` lists per item in the JSON (instead of using a marker prefix)
+- Add unit tests that assert parsing of representative HTML fragments
+- Add a small CLI option to limit max items scraped for faster development
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+## License
 
-## Acknowledgments
+No license file is included. If you want a specific open-source license added (MIT, Apache-2.0, etc.), tell me which one and I'll add it.
 
-- Data sourced from [Arc Raiders Wiki](https://arcraiders.wiki/)
-- Built with Python, BeautifulSoup, and vanilla JavaScript
+---
+
+If you'd like the README adjusted (more examples, screenshots, or developer guidance), tell me what to include and I'll update it.

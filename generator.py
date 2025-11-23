@@ -147,31 +147,9 @@ class HTMLGenerator:
         Returns:
             HTML string containing checkbox elements
         """
-        # Collect all unique materials
-        materials_set = set()
-        
-        for category_name, items in self.data['categories'].items():
-            for item in items:
-                for material in item['materials']:
-                    materials_set.add(material['name'])
-        
-        # Sort materials alphabetically
-        sorted_materials = sorted(materials_set)
-        
-        checkboxes = []
-        for material_name in sorted_materials:
-            # Create unique ID from material name
-            material_id = f"material-{material_name.lower().replace(' ', '-').replace('&', 'and')}"
-            
-            checkbox_html = f'''
-                <label class="checkbox-label">
-                    <input type="checkbox" id="{material_id}" 
-                           data-material-name="{material_name}">
-                    <span>{material_name}</span>
-                </label>'''
-            checkboxes.append(checkbox_html)
-        
-        return '\n'.join(checkboxes)
+        # For the new Loot-based view we don't need per-material checkboxes by
+        # default. Keep a small explanatory paragraph instead.
+        return '<p>Select sorting buttons below to sort the table by item name, recycling results, or salvaging results.</p>'
     
     def generate_table_html(self) -> str:
         """
@@ -186,16 +164,17 @@ class HTMLGenerator:
                     <tr>
                         <th>Item Name</th>
                         <th>Category</th>
-                        <th>Quantity</th>
+                        <th>Recycling Results</th>
+                        <th>Salvaging Results</th>
                     </tr>
                 </thead>
                 <tbody id="table-body">
                     <tr>
-                        <td colspan="3" class="no-data">Select materials above to view items that recycle into them</td>
+                        <td colspan="4" class="no-data">No data available</td>
                     </tr>
                 </tbody>
             </table>'''
-        
+
         return table_html
     
     def embed_css(self) -> str:
@@ -377,137 +356,134 @@ class HTMLGenerator:
         """
         # Embed the data as JSON for JavaScript to use
         data_json = json.dumps(self.data)
-        
+
         js = f'''
     <script>
         // Embedded data
         const recyclingData = {data_json};
-        
-        // State
-        let currentSort = null; // 'asc' or 'desc'
-        
-        // Get all checkboxes
-        const checkboxes = document.querySelectorAll('#checkboxes input[type="checkbox"]');
+
         const tableBody = document.getElementById('table-body');
-        const sortAscBtn = document.getElementById('sort-asc');
-        const sortDescBtn = document.getElementById('sort-desc');
-        
-        // Add event listeners to checkboxes
-        checkboxes.forEach(checkbox => {{
-            checkbox.addEventListener('change', updateTable);
-        }});
-        
-        // Add event listeners to sort buttons
-        sortAscBtn.addEventListener('click', () => {{
-            currentSort = 'asc';
-            updateTable();
-        }});
-        
-        sortDescBtn.addEventListener('click', () => {{
-            currentSort = 'desc';
-            updateTable();
-        }});
-        
-        function getSelectedMaterials() {{
-            const selected = [];
-            checkboxes.forEach(checkbox => {{
-                if (checkbox.checked) {{
-                    const materialName = checkbox.dataset.materialName;
-                    selected.push(materialName);
-                }}
-            }});
-            return selected;
-        }}
-        
-        function findItemsWithMaterials(selectedMaterials) {{
-            const itemsWithMaterials = [];
-            
-            // If no materials selected, show all items
-            const materialsToFind = selectedMaterials.length === 0 
-                ? getAllMaterials() 
-                : selectedMaterials;
-            
-            // Iterate through all items
+
+        // Build a flat list of items with separate recycling/salvaging lists
+        function buildItems() {{
+            const items = [];
             Object.keys(recyclingData.categories).forEach(category => {{
                 recyclingData.categories[category].forEach(item => {{
-                    // Check if item produces any of the selected materials
-                    item.materials.forEach(material => {{
-                        if (materialsToFind.includes(material.name)) {{
-                            itemsWithMaterials.push({{
-                                name: item.name,
-                                category: category,
-                                materialName: material.name,
-                                quantity: material.quantity
-                            }});
+                    const recycling = [];
+                    const salvaging = [];
+                    (item.materials || []).forEach(m => {{
+                        if (m.name && m.name.startsWith('(Salvage)')) {{
+                            const name = m.name.replace('(Salvage) ', '').trim();
+                            salvaging.push({{name: name, quantity: m.quantity}});
+                        }} else {{
+                            recycling.push({{name: m.name, quantity: m.quantity}});
                         }}
                     }});
-                }});
-            }});
-            
-            return itemsWithMaterials;
-        }}
-        
-        function getAllMaterials() {{
-            const materials = new Set();
-            Object.keys(recyclingData.categories).forEach(category => {{
-                recyclingData.categories[category].forEach(item => {{
-                    item.materials.forEach(material => {{
-                        materials.add(material.name);
+
+                    const recyclingTotal = recycling.reduce((s, x) => s + (x.quantity || 0), 0);
+                    const salvagingTotal = salvaging.reduce((s, x) => s + (x.quantity || 0), 0);
+
+                    items.push({{
+                        name: item.name,
+                        category: category,
+                        url: item.url,
+                        recycling: recycling,
+                        salvaging: salvaging,
+                        recyclingTotal: recyclingTotal,
+                        salvagingTotal: salvagingTotal
                     }});
                 }});
             }});
-            return Array.from(materials);
-        }}
-        
-        function sortItems(items, order) {{
-            if (order === 'asc') {{
-                return items.sort((a, b) => a.quantity - b.quantity);
-            }} else if (order === 'desc') {{
-                return items.sort((a, b) => b.quantity - a.quantity);
-            }}
             return items;
         }}
-        
-        function updateTable() {{
-            const selectedMaterials = getSelectedMaterials();
-            let items = findItemsWithMaterials(selectedMaterials);
-            
-            // Apply sorting if set
-            if (currentSort) {{
-                items = sortItems(items, currentSort);
-            }}
-            
-            // Clear table
+
+        function renderTable(items) {{
             tableBody.innerHTML = '';
-            
-            // Populate table
-            if (items.length === 0) {{
+            if (!items || items.length === 0) {{
                 const row = document.createElement('tr');
-                row.innerHTML = '<td colspan="3" class="no-data">No items found</td>';
+                row.innerHTML = '<td colspan="4" class="no-data">No items found</td>';
                 tableBody.appendChild(row);
-            }} else {{
-                items.forEach(item => {{
-                    const row = document.createElement('tr');
-                    row.innerHTML = `
-                        <td>${{escapeHtml(item.name)}}</td>
-                        <td>${{escapeHtml(item.category)}}</td>
-                        <td>${{item.quantity}} ${{escapeHtml(item.materialName)}}</td>
-                    `;
-                    tableBody.appendChild(row);
-                }});
+                return;
             }}
+
+            items.forEach(item => {{
+                const row = document.createElement('tr');
+                const recyclingText = item.recycling.map(r => `${{escapeHtml(r.name)}} x${{r.quantity}}`).join(', ');
+                const salvagingText = item.salvaging.map(r => `${{escapeHtml(r.name)}} x${{r.quantity}}`).join(', ');
+
+                // Render item name as a link to the source page
+                const nameLink = `<a href="${{escapeHtml(item.url || '#')}}" target="_blank" rel="noopener">${{escapeHtml(item.name)}}</a>`;
+
+                row.innerHTML = `
+                    <td>${{nameLink}}</td>
+                    <td>${{escapeHtml(item.category)}}</td>
+                    <td>${{recyclingText || '—'}}</td>
+                    <td>${{salvagingText || '—'}}</td>
+                `;
+                tableBody.appendChild(row);
+            }});
         }}
-        
+
         function escapeHtml(text) {{
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }}
-        
-        // Initialize table with all items
-        updateTable();
+
+        // Sorting helpers
+        function sortByName(items, asc=true) {{
+            return items.sort((a,b) => {{
+                const A = a.name.toLowerCase();
+                const B = b.name.toLowerCase();
+                if (A < B) return asc ? -1 : 1;
+                if (A > B) return asc ? 1 : -1;
+                return 0;
+            }});
+        }}
+
+        function sortByRecycling(items, asc=true) {{
+            return items.sort((a,b) => asc ? a.recyclingTotal - b.recyclingTotal : b.recyclingTotal - a.recyclingTotal);
+        }}
+
+        function sortBySalvaging(items, asc=true) {{
+            return items.sort((a,b) => asc ? a.salvagingTotal - b.salvagingTotal : b.salvagingTotal - a.salvagingTotal);
+        }}
+
+        // Wire up buttons
+        document.getElementById('sort-asc').addEventListener('click', () => {{
+            const items = buildItems();
+            const sorted = sortByName(items, true);
+            renderTable(sorted);
+        }});
+
+        document.getElementById('sort-desc').addEventListener('click', () => {{
+            const items = buildItems();
+            const sorted = sortByName(items, false);
+            renderTable(sorted);
+        }});
+
+        // Additional buttons for recycling and salvaging sort
+        // Create them dynamically if not present
+        const container = document.getElementById('sorting');
+        if (container) {{
+            const rAsc = document.createElement('button'); rAsc.textContent = 'Recycling ↑';
+            const rDesc = document.createElement('button'); rDesc.textContent = 'Recycling ↓';
+            const sAsc = document.createElement('button'); sAsc.textContent = 'Salvage ↑';
+            const sDesc = document.createElement('button'); sDesc.textContent = 'Salvage ↓';
+
+            container.appendChild(rAsc); container.appendChild(rDesc);
+            container.appendChild(sAsc); container.appendChild(sDesc);
+
+            rAsc.addEventListener('click', () => {{ renderTable(sortByRecycling(buildItems(), true)); }});
+            rDesc.addEventListener('click', () => {{ renderTable(sortByRecycling(buildItems(), false)); }});
+            sAsc.addEventListener('click', () => {{ renderTable(sortBySalvaging(buildItems(), true)); }});
+            sDesc.addEventListener('click', () => {{ renderTable(sortBySalvaging(buildItems(), false)); }});
+        }}
+
+        // Initial render: sort by name ascending
+        renderTable(sortByName(buildItems(), true));
     </script>'''
-        
+
         return js
 
 

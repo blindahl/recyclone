@@ -109,6 +109,272 @@ class WikiScraper:
         # Track failures for reporting
         self.failed_categories = []
         self.failed_items = []
+
+    def scrape_loot(self, loot_url: str = None) -> Dict:
+        """
+        Scrape the Loot page to extract all loot item links and their
+        recycling and salvaging results.
+
+        Returns a dictionary in the same overall shape as scrape_all_categories
+        so it can be saved to JSON and used by the HTML generator.
+        """
+        if loot_url is None:
+            loot_url = self.base_url + '/wiki/Loot'
+
+        self.logger.info(f"Scraping Loot page: {loot_url}")
+        start_time = time.time()
+
+        all_items = []
+        try:
+            self._rate_limit_wait()
+            resp = self.session.get(loot_url, timeout=30)
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            content_div = soup.find('div', class_='mw-parser-output') or soup
+
+            # Find the first table on the Loot page (items are often listed in a table)
+            table = content_div.find('table')
+            link_candidates = []
+
+            if table:
+                self.logger.info('Found a table on Loot page; extracting rows')
+                rows = table.find_all('tr')
+                # Skip header row(s)
+                for row in rows[1:]:
+                    cols = row.find_all('td')
+                    if not cols:
+                        continue
+
+                    # Try to find a link to the item in the first column
+                    link = cols[0].find('a', href=True)
+                    if not link:
+                        continue
+
+                    href = link['href']
+                    if not href.startswith('/wiki/'):
+                        continue
+
+                    link_candidates.append(link)
+            else:
+                # Fallback: scan the content area for wiki links that look like items
+                self.logger.warning('No table found on Loot page — falling back to scanning for links')
+                seen = set()
+                for link in content_div.find_all('a', href=True):
+                    href = link['href']
+                    # Skip non-wiki links, special pages, and anchors
+                    if not href.startswith('/wiki/') or ':' in href or '#' in href:
+                        continue
+                    if href in seen:
+                        continue
+                    seen.add(href)
+                    link_candidates.append(link)
+
+            # Iterate over candidate links and scrape each item page
+            for link in link_candidates:
+                href = link['href']
+                full_url = self.base_url + href if href.startswith('/') else href
+                item_name = link.get_text(strip=True) or full_url
+
+                item_info = {
+                    'name': item_name,
+                    'category': 'Loot',
+                    'url': full_url
+                }
+
+                # Scrape the individual item page for recycling and salvaging
+                try:
+                    self.logger.info(f"Scraping loot item link: {item_name}")
+                    item = self._scrape_loot_item(item_info)
+                    all_items.append(item)
+                except Exception as e:
+                    self.logger.warning(f"Failed to scrape item {item_name}: {e}")
+                    self.failed_items.append({'name': item_name, 'url': full_url, 'error': str(e)})
+
+            elapsed = time.time() - start_time
+            result = {
+                'categories': {'Loot': [item.to_dict() for item in all_items]},
+                'metadata': {
+                    'version': '1.0',
+                    'scraped_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    'total_items': len(all_items),
+                    'categories_count': 1,
+                    'elapsed_seconds': round(elapsed, 2),
+                    'failed_categories': len(self.failed_categories),
+                    'failed_items': len(self.failed_items)
+                }
+            }
+
+            self.logger.info(f"Scraped {len(all_items)} loot items in {elapsed:.2f}s")
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Failed to scrape Loot page: {e}")
+            raise
+
+    def _scrape_loot_item(self, item_info: Dict) -> Item:
+        """
+        Scrape a single loot item page and extract both Recycling and Salvaging
+        results. Returns an Item object where the `materials` field is a
+        flattened list combining recycling and salvaging entries with an
+        extra attribute in their names to differentiate source.
+        """
+        self._rate_limit_wait()
+        resp = self.session.get(item_info['url'], timeout=30)
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # Extract recycling and salvaging sections separately
+        recycling_materials = self._extract_section_materials(soup, ['recycling', 'recycled', 'recycling results'])
+        salvaging_materials = self._extract_section_materials(soup, ['salvaging', 'salvaged', 'salvaging results'])
+
+        # Compose materials list with clear naming so the generator can
+        # display both recycling and salvaging results per item.
+        materials = []
+        for m in recycling_materials:
+            materials.append(Material(name=m.name, quantity=m.quantity))
+        for m in salvaging_materials:
+            # To allow the front-end to separate salvaging from recycling
+            # we'll prefix the material name with "(Salvage) " so both types
+            # are preserved. The generator will also be compatible if the
+            # data contains structured 'recycling'/'salvaging' keys instead.
+            materials.append(Material(name=f"(Salvage) {m.name}", quantity=m.quantity))
+
+        return Item(name=item_info['name'], category=item_info['category'], url=item_info['url'], materials=materials)
+
+    def _extract_section_materials(self, soup, keywords: List[str]) -> List[Material]:
+        """
+        Find a section heading matching any of the given keywords and extract
+        materials using existing helpers. Returns a list of Material objects.
+        """
+        heading = None
+        for h in soup.find_all(['h2', 'h3', 'h4']):
+            text = h.get_text(strip=True).lower()
+            for kw in keywords:
+                if kw in text:
+                    heading = h
+                    break
+            if heading:
+                break
+
+        if not heading:
+            return []
+
+        import re
+        materials: List[Material] = []
+
+        # Walk forward through the document from the heading. Some pages
+        # wrap the section content in a <section>/<div> or other container
+        # rather than as direct siblings, so using find_next() is more
+        # robust than find_next_sibling(). Stop when the next heading is
+        # encountered.
+        node = heading
+        while True:
+            node = node.find_next()
+            if node is None:
+                break
+            # stop when we hit another section heading
+            if getattr(node, 'name', None) in ['h2', 'h3', 'h4']:
+                break
+
+            if getattr(node, 'name', None) == 'table':
+                # Special handling: some pages use a table with columns:
+                # Item | → | Recycling results | Salvaging results
+                # In that case we want to extract the recycling or salvaging
+                # cell contents rather than treating the first two columns as
+                # material/quantity rows.
+                try:
+                    rows = node.find_all('tr')
+                    if not rows:
+                        continue
+                    header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(['th', 'td'])]
+                    # look for recycling/salvaging column indices
+                    recycling_idx = None
+                    salvaging_idx = None
+                    for idx, htxt in enumerate(header_cells):
+                        if 'recycling' in htxt:
+                            recycling_idx = idx
+                        if 'salvag' in htxt:
+                            salvaging_idx = idx
+
+                    if recycling_idx is not None or salvaging_idx is not None:
+                        # Determine which column(s) we're interested in based on
+                        # the keywords passed to this function. The caller
+                        # typically calls this for recycling and salvaging
+                        # separately.
+                        want_recycling = any('recycl' in kw for kw in keywords)
+                        want_salvaging = any('salvag' in kw for kw in keywords)
+                        # iterate data rows
+                        for row in rows[1:]:
+                            cells = row.find_all(['td', 'th'])
+                            # parse recycling cell(s)
+                            if recycling_idx is not None and recycling_idx < len(cells) and (want_recycling or not want_salvaging):
+                                cell_text = cells[recycling_idx].get_text(" ", strip=True)
+                                # split on common delimiters (commas, semicolons or newlines)
+                                parts = [p.strip() for p in re.split('[,;/\\n]+', cell_text) if p.strip()]
+                                for part in parts:
+                                    part_norm = part.replace('×', 'x')
+                                    mat, qty = self._parse_material_text(part_norm)
+                                    if mat and qty is not None:
+                                        materials.append(Material(name=mat, quantity=qty))
+                            # parse salvaging cell(s)
+                            if salvaging_idx is not None and salvaging_idx < len(cells) and (want_salvaging or not want_recycling):
+                                cell_text = cells[salvaging_idx].get_text(" ", strip=True)
+                                parts = [p.strip() for p in re.split('[,;/\\n]+', cell_text) if p.strip()]
+                                for part in parts:
+                                    part_norm = part.replace('×', 'x')
+                                    mat, qty = self._parse_material_text(part_norm)
+                                    if mat and qty is not None:
+                                        materials.append(Material(name=mat, quantity=qty))
+                        # we've processed the table — return results to avoid
+                        # accidentally parsing unrelated footer text later on
+                        return materials
+                except Exception:
+                    # fallback to generic table extractor on errors
+                    materials.extend(self._extract_from_table(node))
+            elif getattr(node, 'name', None) in ['ul', 'ol']:
+                materials.extend(self._extract_from_list(node))
+            elif getattr(node, 'name', None) in ['div', 'p', 'section']:
+                # If the div/section contains a table or list, extract from
+                # those first; otherwise try parsing inline text.
+                inner_table = node.find('table')
+                if inner_table:
+                    materials.extend(self._extract_from_table(inner_table))
+                    # continue; there may be more tables/lists further on
+                    continue
+
+                inner_list = node.find(['ul', 'ol'])
+                if inner_list:
+                    materials.extend(self._extract_from_list(inner_list))
+                    continue
+
+                # Fall back to extracting text from the node
+                materials.extend(self._extract_from_text(node))
+
+        return materials
+
+    def save_to_python_module(self, data: Dict, filepath: str) -> None:
+        """
+        Save scraped data to a Python module that provides a `RECYCLING_DATA`
+        variable. The data is embedded as JSON and parsed at import-time to
+        preserve types.
+        """
+        self.logger.info(f"Saving data to python module {filepath}")
+        directory = os.path.dirname(filepath)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+
+        json_text = json.dumps(data, ensure_ascii=False, indent=2)
+        content = f"import json\nRECYCLING_DATA = json.loads(r'''{json_text}''')\n"
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            self.logger.info(f"Successfully wrote python module to {filepath}")
+        except Exception as e:
+            self.logger.error(f"Error writing python module: {e}")
+            raise
     
     def _rate_limit_wait(self):
         """Enforce rate limiting between requests."""
